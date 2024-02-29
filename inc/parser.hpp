@@ -10,6 +10,7 @@
 #include "dataStructs.hpp"
 
 class Parser {
+    // TODO: finish putting parser mutexes in places
    public:
     // constructors
     Parser() = default;
@@ -28,8 +29,10 @@ class Parser {
     std::vector<std::string> get_urls_from_html(const std::string& html);
 
    private:
-    // std::string urlJoin(const std::string& base, const std::string& relative);
+    static std::string pyUrlJoin(const std::string& base, const std::string& relative);
     bool isFullURL(const std::string& url);
+
+    static size_t curlWriteCallback(void* contents, size_t size, size_t nmemb, std::string* output);
     // member variables
     std::string m_root_link{""};
     unsigned int m_depth_level{};
@@ -41,5 +44,7 @@ class Parser {
     std::mutex m_std_cout_mut;
     mutable std::mutex m_rows_mut;
     std::mutex m_no_change_during_parse_mut;
-    std::mutex m_py_mut;
+
+    static std::mutex m_py_mut;
+    static std::mutex m_curl_callback_mut;
 };
