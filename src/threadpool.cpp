@@ -8,10 +8,19 @@
 
 #include "../inc/defines.hpp"
 
-// TODO: clean the logging, have it set only if verbose is true
+Threadpool::Threadpool() : m_verbose_logging(false), m_should_stop(false) {
+    set_threads(std::thread::hardware_concurrency());
+    set_log_mutex(m_log_mut);
+}
+Threadpool::Threadpool(int num_threads) : m_verbose_logging(false), m_should_stop(false) {
+    set_threads(num_threads);
+    set_log_mutex(m_log_mut);
+}
+void Threadpool::set_threads(int num_threads) { m_max_threads_count.store(num_threads); }
+void Threadpool::set_verbose(bool verbose) { m_verbose_logging.store(verbose); }
+void Threadpool::set_log_mutex(std::mutex& mut) { m_log_mut_ptr = &mut; }
 
-Threadpool::Threadpool(int num_threads) { set_threads(num_threads); }
-void Threadpool::set_threads(int num_threads) { m_max_threads_count = num_threads; }
+void Threadpool::finish_when_empty() { m_should_stop.store(true); }
 
 void Threadpool::enque_task(std::function<void(LinkData linkdata)> task, LinkData linkdata) {
     std::lock_guard<std::mutex> lock(m_queue_mut);
@@ -20,14 +29,13 @@ void Threadpool::enque_task(std::function<void(LinkData linkdata)> task, LinkDat
 
 void Threadpool::do_task(std::tuple<std::function<void(LinkData linkdata)>, LinkData> task_data) {
     m_threads.push_back(std::thread([task_data, this]() {
-        {  // log start ===============
-            std::lock_guard<std::mutex> log_lock(m_log_mut);
+        if (m_verbose_logging.load()) {  // log start ===============
+            std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
             std::cout << ANSI_GREEN << "thread #" << std::this_thread::get_id() << " started\r\n" << ANSI_RESET;
             std::lock_guard<std::mutex> que_lock(m_queue_mut);
             std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-            std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
 
-            std::cout << ANSI_BLUE << "should_stop:" << m_should_stop << " threads:" << m_threads.size()
+            std::cout << ANSI_BLUE << "should_stop:" << m_should_stop.load() << " threads:" << m_threads.size()
                       << " queue.size:" << m_queue.size() << "\r\n"
                       << ANSI_RESET;
         }  // log end =================
@@ -37,14 +45,13 @@ void Threadpool::do_task(std::tuple<std::function<void(LinkData linkdata)>, Link
 
         fun(arg);
 
-        {  // log start ===============
-            std::lock_guard<std::mutex> log_lock(m_log_mut);
+        if (m_verbose_logging.load()) {  // log start ===============
+            std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
             std::cout << ANSI_GREEN << "thread #" << std::this_thread::get_id() << " finishing\r\n" << ANSI_RESET;
             std::lock_guard<std::mutex> que_lock(m_queue_mut);
             std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-            std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
 
-            std::cout << ANSI_BLUE << "should_stop:" << m_should_stop << " threads:" << m_threads.size()
+            std::cout << ANSI_BLUE << "should_stop:" << m_should_stop.load() << " threads:" << m_threads.size()
                       << " queue.size:" << m_queue.size() << "\r\n"
                       << ANSI_RESET;
         }  // log end =================
@@ -56,8 +63,8 @@ void Threadpool::do_task(std::tuple<std::function<void(LinkData linkdata)>, Link
             m_finishing_thr_data.id = std::this_thread::get_id();
             m_finishing_thr_data.notify_condition = true;
         }
-        {  // log start ==============
-            std::lock_guard<std::mutex> log_lock(m_log_mut);
+        if (m_verbose_logging.load()) {  // log start ==============
+            std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
             std::cout << ANSI_GREEN << "thread #" << std::this_thread::get_id() << " sending END SIG\r\n" << ANSI_RESET;
         }  // log end ================
 
@@ -71,15 +78,13 @@ void Threadpool::run_tasks() {
             {  // addtionally scoped for testing start
                 std::lock_guard<std::mutex> queue_lock(m_queue_mut);
                 std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-                std::lock_guard<std::mutex> max_threads_lock(m_max_threads_mut);
 
-                if (((int)m_threads.size() < (int)m_max_threads_count) && (m_queue.size() != 0)) {
+                if (((int)m_threads.size() < m_max_threads_count.load()) && (m_queue.size() != 0)) {
                     do_task(m_queue.front());
                     m_queue.pop();
                 }
                 {
-                    std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
-                    if (m_should_stop && (m_queue.size() == 0)) {
+                    if (m_should_stop.load() && (m_queue.size() == 0) && (m_threads.size() == 0)) {
                         break;
                     }
                 }
@@ -87,25 +92,23 @@ void Threadpool::run_tasks() {
             std::this_thread::yield();
         }
     });
-    std::thread thr_recycling([this]() {  // doing segfault
+    std::thread thr_recycling([this]() {
         while (true) {
             {
                 std::lock_guard<std::mutex> queue_lock(m_queue_mut);
                 std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-                std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
-                if ((m_should_stop && m_threads.size() == 0 && m_queue.size() == 0)) {
+                if ((m_should_stop.load() && m_threads.size() == 0 && m_queue.size() == 0)) {
                     break;
                 }
             }
             if (m_threads.size() != 0) {
-                {  // log start ==============
-                    std::lock_guard<std::mutex> log_lock(m_log_mut);
+                if (m_verbose_logging.load()) {  // log start ==============
+                    std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
                     std::lock_guard<std::mutex> que_lock(m_queue_mut);
                     std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-                    std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
 
                     std::cout << ANSI_YELLOW << "thread recycling wait\r\n" << ANSI_RESET;
-                    std::cout << ANSI_BLUE << "should_stop:" << m_should_stop << " threads:" << m_threads.size()
+                    std::cout << ANSI_BLUE << "should_stop:" << m_should_stop.load() << " threads:" << m_threads.size()
                               << " queue.size:" << m_queue.size() << "\r\n"
                               << ANSI_RESET;
                 }  // log end ================
@@ -116,14 +119,13 @@ void Threadpool::run_tasks() {
                 }  // condition variable waiting end
 
                 m_finishing_thr_data.notify_condition = false;
-                {  // log start ==============
-                    std::lock_guard<std::mutex> log_lock(m_log_mut);
+                if (m_verbose_logging.load()) {  // log start ==============
+                    std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
                     std::lock_guard<std::mutex> que_lock(m_queue_mut);
                     std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-                    std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
 
                     std::cout << ANSI_YELLOW << "thread recycling start\r\n" << ANSI_RESET;
-                    std::cout << ANSI_BLUE << "should_stop:" << m_should_stop << " threads:" << m_threads.size()
+                    std::cout << ANSI_BLUE << "should_stop:" << m_should_stop.load() << " threads:" << m_threads.size()
                               << " queue.size:" << m_queue.size() << "\r\n"
                               << ANSI_RESET;
                 }  // log end ================
@@ -151,14 +153,13 @@ void Threadpool::run_tasks() {
                                 m_threads.at(i).join();
                                 m_threads.erase(m_threads.begin() + i);
                             }
-                            {  // log start ==============
-                                std::lock_guard<std::mutex> log_lock(m_log_mut);
+                            if (m_verbose_logging.load()) {  // log start ==============
+                                std::lock_guard<std::mutex> log_lock(*m_log_mut_ptr);
                                 std::lock_guard<std::mutex> que_lock(m_queue_mut);
                                 std::lock_guard<std::mutex> threads_lock(m_threads_mut);
-                                std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
 
                                 std::cout << ANSI_RED << "thread #" << finishing_thr_id << " ended.\r\n" << ANSI_RESET;
-                                std::cout << ANSI_BLUE << "should_stop:" << m_should_stop
+                                std::cout << ANSI_BLUE << "should_stop:" << m_should_stop.load()
                                           << " threads:" << m_threads.size() << " queue.size:" << m_queue.size()
                                           << "\r\n"
                                           << ANSI_RESET;
@@ -167,8 +168,8 @@ void Threadpool::run_tasks() {
                         }
                     }
                 }
-                {  // log start ===============
-                    std::lock_guard<std::mutex> lock(m_log_mut);
+                if (m_verbose_logging.load()) {  // log start ===============
+                    std::lock_guard<std::mutex> lock(*m_log_mut_ptr);
                     std::cout << ANSI_YELLOW << "END SIG releasing..."
                               << "\r\n"
                               << ANSI_RESET;
@@ -176,8 +177,8 @@ void Threadpool::run_tasks() {
 
                 m_cv_mut.unlock();
 
-                {  // log start ===============
-                    std::lock_guard<std::mutex> lock(m_log_mut);
+                if (m_verbose_logging.load()) {  // log start ===============
+                    std::lock_guard<std::mutex> lock(*m_log_mut_ptr);
                     std::cout << ANSI_YELLOW << "END SIG releasing done."
                               << "\r\n"
                               << ANSI_RESET;
@@ -190,9 +191,5 @@ void Threadpool::run_tasks() {
 
     thr_enqueing.join();
     thr_recycling.join();
-}
-void Threadpool::finish_when_empty() {
-    std::lock_guard<std::mutex> should_stop_lock(m_should_stop_mut);
-    m_should_stop = true;
 }
 

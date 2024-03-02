@@ -10,7 +10,7 @@ struct ThreadData {
 };
 
 struct LinkData {
-    unsigned int depth_level;
+    int depth_level;
     std::string link;
     std::string full_route;
     int alive{-1};
