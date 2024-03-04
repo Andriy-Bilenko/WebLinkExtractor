@@ -24,7 +24,7 @@ I assume you have already installed postgres with package manager, initialized t
 
 To make it actually usable you should go through a few steps:
 1. connect to the database with "root" privileges
-`sudo pacman -S postgresql`
+`sudo -u postgres psql`
 2. create a database in postgres prompt
 `CREATE DATABASE projectA;`
 3. check if database was created successfully
