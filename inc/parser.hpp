@@ -14,16 +14,21 @@ class Parser {
    public:
     Parser();
     explicit Parser(int threads_count);
-    Parser(const std::string& root_link, int depth_level, int threads_count, bool write_to_db, int verbose);
+    Parser(const std::string& root_link, int depth_level, int threads_count, int verbose);
 
+    // returns vector of currently processed LinkData
     std::vector<LinkData> get_currently_available() const;
+    // sets the base link to parse
     void set_root_link(const std::string& root_link);
+    // sets how deep is recursion
     void set_depth_level(int depth_level);
     void set_threads_number(int threads);
-    void set_logging_to_db(bool write_to_db);
+    // 0 - no logs to stdout, 1 - links parsed, 2 - inner threadpool logs
     void set_verbose(int verbose);
-
-    std::vector<LinkData> parse();  // maybe to a vector or directly to a db connection(use separate soci::session)
+    // setting postgresql credentials to connect to, and table_name to write out logs to
+    void set_sql_connection(const std::string& credentials, const std::string& table_name);
+    // starts parsing the root_link recursively
+    std::vector<LinkData> parse();
 
    private:
     std::string check_alive_and_get_html(const std::string& link);
@@ -36,14 +41,16 @@ class Parser {
     // member variables
     std::string m_root_link{""};
     int m_depth_level{};
-    bool m_write_to_db{false};
+    std::string m_db_credentials{""};
+    std::string m_table_name{""};
     int m_verbose{};  // 0 - no logs, 1 - parser logs, 2 - parser and inner threadpool logs
 
     Threadpool m_threadpool;
     std::vector<LinkData> m_processed;
     std::mutex m_log_mut;
     mutable std::mutex m_processed_mut;
+    std::mutex m_db_credentials_mut;
 
-    static std::mutex m_py_mut;
-    static std::mutex m_curl_callback_mut;
+    static std::mutex g_py_mut;
+    static std::mutex g_curl_callback_mut;
 };

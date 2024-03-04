@@ -3,6 +3,9 @@
 #include <Python.h>
 #include <cpython/genobject.h>
 #include <curl/curl.h>
+#include <soci/into.h>
+#include <soci/postgresql/soci-postgresql.h>
+#include <soci/soci.h>
 #include <unistd.h>
 
 #include <cstddef>
@@ -17,16 +20,15 @@
 #include "../inc/defines.hpp"
 #include "../inc/threadpool.hpp"
 
-std::mutex Parser::m_curl_callback_mut;
-std::mutex Parser::m_py_mut;
+std::mutex Parser::g_curl_callback_mut;
+std::mutex Parser::g_py_mut;
 
 Parser::Parser() { set_threads_number(std::thread::hardware_concurrency()); }
 Parser::Parser(int threads_count) { set_threads_number(threads_count); }
-Parser::Parser(const std::string& root_link, int depth_level, int threads_count, bool write_to_db, int verbose) {
+Parser::Parser(const std::string& root_link, int depth_level, int threads_count, int verbose) {
     set_root_link(root_link);
     set_depth_level(depth_level);
     set_threads_number(threads_count);
-    set_logging_to_db(write_to_db);
     set_verbose(verbose);
 }
 
@@ -38,8 +40,11 @@ std::vector<LinkData> Parser::get_currently_available() const {
 void Parser::set_root_link(const std::string& root_link) { m_root_link = root_link; }
 void Parser::set_depth_level(int depth_level) { m_depth_level = depth_level; }
 void Parser::set_threads_number(int threads) { m_threadpool.set_threads(threads); }
-void Parser::set_logging_to_db(bool write_to_db) { m_write_to_db = write_to_db; }
 void Parser::set_verbose(int verbose) { m_verbose = verbose; }
+void Parser::set_sql_connection(const std::string& credentials, const std::string& table_name) {
+    m_db_credentials = credentials;
+    m_table_name = table_name;
+}
 
 std::string Parser::check_alive_and_get_html(const std::string& link) {
     CURL* curl = curl_easy_init();
@@ -89,6 +94,7 @@ std::vector<std::string> Parser::get_urls_from_html(const std::string& html, con
 std::vector<LinkData> Parser::parse() {
     auto start_time = std::chrono::high_resolution_clock::now();
 
+    // recursive function to parse one link that passes itself to the threadpool queue
     std::function<void(LinkData linkdata)> parse_link = [this, &parse_link](LinkData linkdata) {
         std::vector<std::string> extracted_urls;
         std::string htmlContent = check_alive_and_get_html(linkdata.link);
@@ -100,6 +106,35 @@ std::vector<LinkData> Parser::parse() {
         {
             std::lock_guard<std::mutex> processed_data_lock(m_processed_mut);
             m_processed.push_back(linkdata);
+        }
+        std::string db_creds_copy{""};
+        std::string tablename_copy{""};
+        {
+            std::lock_guard<std::mutex> db_creds_lock(m_db_credentials_mut);
+            db_creds_copy = m_db_credentials;
+            tablename_copy = m_table_name;
+        }
+        if (db_creds_copy != "") {
+            try {
+                soci::session sql(soci::postgresql, db_creds_copy);
+                // insert linkdata into db
+                std::string insert_query_p1 =
+                    "INSERT INTO " + tablename_copy + " (depth_level, link, full_route, alive)";
+                sql << insert_query_p1
+                    << " VALUES (:depth_level, :link, "
+                       ":full_route, :alive)",
+                    soci::use(linkdata.depth_level), soci::use(linkdata.link), soci::use(linkdata.full_route),
+                    soci::use(linkdata.alive);
+            } catch (const soci::soci_error& e) {
+                std::lock_guard<std::mutex> log_lock(m_log_mut);
+                std::cerr << ANSI_RED << "DATABASE Error: " << e.what() << "\r\n" << ANSI_RESET;
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> log_lock(m_log_mut);
+                std::cerr << ANSI_RED << "DATABASE Exception: " << e.what() << "\r\n" << ANSI_RESET;
+            } catch (...) {
+                std::lock_guard<std::mutex> log_lock(m_log_mut);
+                std::cerr << ANSI_RED << "UNKNOWN DATABASE ERROR\r\n" << ANSI_RESET;
+            }
         }
         if (m_verbose > 0) {
             std::lock_guard<std::mutex> log_lock(m_log_mut);
@@ -132,16 +167,35 @@ std::vector<LinkData> Parser::parse() {
     }
     m_threadpool.enque_task(parse_link, root_link_data);
     m_threadpool.set_log_mutex(m_log_mut);
+
+    if (m_db_credentials != "") {
+        try {
+            soci::session sql(soci::postgresql, m_db_credentials);
+            // delete previous table
+            std::string drop_query = "DROP TABLE IF EXISTS " + m_table_name;
+            sql << drop_query;
+            // create table anew
+            std::string create_query = "CREATE TABLE " + m_table_name +
+                                       " (id SERIAL PRIMARY KEY, depth_level INT, link VARCHAR(400), "
+                                       "full_route VARCHAR(1000), alive INT);";
+            sql << create_query;
+        } catch (const soci::soci_error& e) {
+            std::cerr << ANSI_RED << "DATABASE Error: " << e.what() << "\r\n" << ANSI_RESET;
+        } catch (const std::exception& e) {
+            std::cerr << ANSI_RED << "DATABASE Exception: " << e.what() << "\r\n" << ANSI_RESET;
+        } catch (...) {
+            std::cerr << ANSI_RED << "UNKNOWN DATABASE ERROR\r\n" << ANSI_RESET;
+        }
+    }
+
     std::thread tasks_thr([&]() { m_threadpool.run_tasks(); });
     m_threadpool.finish_when_empty();
 
     tasks_thr.join();
 
-    if (m_verbose > 0) {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> total_duration = end_time - start_time;
-        std::cout << "Total time taken: " << total_duration.count() << " seconds" << std::endl;
-    }
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_duration = end_time - start_time;
+    std::cout << "Total time taken: " << total_duration.count() << " seconds" << std::endl;
     std::cout << "Done parsing.\r\n";
 
     std::lock_guard<std::mutex> processed_data_lock(m_processed_mut);
@@ -154,7 +208,7 @@ bool Parser::isFullURL(const std::string& url) {
 }
 
 std::string Parser::pyUrlJoin(const std::string& base, const std::string& relative) {
-    std::lock_guard<std::mutex> lock(m_py_mut);
+    std::lock_guard<std::mutex> lock(g_py_mut);
     std::string rez_link{""};
     Py_Initialize();
     PyObject* urlparseModule = PyImport_ImportModule("urllib.parse");
@@ -188,7 +242,7 @@ std::string Parser::pyUrlJoin(const std::string& base, const std::string& relati
 }
 
 size_t Parser::curlWriteCallback(void* contents, size_t size, size_t nmemb, std::string* output) {
-    std::lock_guard<std::mutex> lock(m_curl_callback_mut);
+    std::lock_guard<std::mutex> lock(g_curl_callback_mut);
     output->append(static_cast<char*>(contents), size * nmemb);
     return size * nmemb;
 }

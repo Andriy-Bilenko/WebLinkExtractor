@@ -25,7 +25,7 @@ class Threadpool {
     void enque_task(std::function<void(LinkData linkdata)> task, LinkData linkdata);
     // start putting tasks from queue to m_threads
     void run_tasks();
-    // for signaling when should not wait for more tasks when gets empty
+    // for signaling when should not wait endlessly
     void finish_when_empty();
 
    private:
