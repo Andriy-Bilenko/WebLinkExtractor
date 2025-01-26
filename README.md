@@ -1,4 +1,4 @@
-# projectA
+# WebLinkExtractor
 ## About the program
 
 Console utility for extracting links (and links from links) from a webpage recursively.
